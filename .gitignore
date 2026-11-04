@@ -1,0 +1,21 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artefacts
+build/
+dist/
+
+# Local capture output (the CLI writes CSV/LOG files here by default)
+*.csv
+*.log
+!examples/*.log
