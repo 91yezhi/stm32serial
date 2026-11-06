@@ -11,7 +11,16 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-__all__ = ["SourceError", "FileSource", "SerialSource", "open_source", "parse_target"]
+__all__ = [
+    "SourceError",
+    "FileSource",
+    "SerialSource",
+    "FileByteSource",
+    "SerialByteSource",
+    "open_source",
+    "open_byte_source",
+    "parse_target",
+]
 
 
 class SourceError(RuntimeError):
@@ -112,9 +121,85 @@ class SerialSource:
             self._serial = None
 
 
+class FileByteSource:
+    """Reads a binary capture as raw chunks, for protocols without lines."""
+
+    def __init__(self, path: str, follow: bool = False, poll_interval: float = 0.2) -> None:
+        self.path = Path(path)
+        if not self.path.exists():
+            raise SourceError(f"file not found: {path}")
+        if self.path.is_dir():
+            raise SourceError(f"target is a directory: {path}")
+        self.follow = follow
+        self.poll_interval = poll_interval
+
+    def chunks(self) -> Iterator[bytes]:
+        with self.path.open("rb") as handle:
+            while True:
+                chunk = handle.read(4096)
+                if chunk:
+                    yield chunk
+                    continue
+                if not self.follow:
+                    return
+                time.sleep(self.poll_interval)
+
+    def close(self) -> None:
+        """Nothing to release; the file is closed when the generator ends."""
+
+
+class SerialByteSource:
+    """Reads raw bytes from a serial port (binary protocols, capture files)."""
+
+    def __init__(self, port: str, baudrate: int = 115200, timeout: float = 0.2) -> None:
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self._serial = None
+
+    def _open(self):
+        try:
+            import serial  # imported here: file mode must work without pyserial
+        except ImportError as exc:  # pragma: no cover - depends on the environment
+            raise SourceError(
+                "pyserial is required for serial ports: pip install pyserial"
+            ) from exc
+        try:
+            self._serial = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
+        except Exception as exc:  # serial.SerialException and friends
+            raise SourceError(
+                f"cannot open serial port {self.port!r} at {self.baudrate} baud: {exc}"
+            ) from exc
+        return self._serial
+
+    def chunks(self) -> Iterator[bytes]:
+        handle = self._serial if self._serial is not None else self._open()
+        try:
+            while True:
+                chunk = handle.read(4096)
+                if chunk:
+                    yield chunk
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._serial is not None:
+            with contextlib.suppress(Exception):
+                self._serial.close()
+            self._serial = None
+
+
 def open_source(spec: str, baudrate: int = 115200, follow: bool = False):
     """Open *spec* (a port such as ``COM5`` or a file path) as a line source."""
     kind, target, baud = parse_target(spec, baudrate)
     if kind == "serial":
         return SerialSource(target, baud)
     return FileSource(target, follow=follow)
+
+
+def open_byte_source(spec: str, baudrate: int = 115200, follow: bool = False):
+    """Open *spec* as a raw byte source (same target syntax as open_source)."""
+    kind, target, baud = parse_target(spec, baudrate)
+    if kind == "serial":
+        return SerialByteSource(target, baud)
+    return FileByteSource(target, follow=follow)

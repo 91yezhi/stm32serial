@@ -2,7 +2,16 @@
 
 import pytest
 
-from stm32serial.transport import FileSource, SerialSource, SourceError, open_source, parse_target
+from stm32serial.transport import (
+    FileByteSource,
+    FileSource,
+    SerialByteSource,
+    SerialSource,
+    SourceError,
+    open_byte_source,
+    open_source,
+    parse_target,
+)
 
 
 @pytest.mark.parametrize(
@@ -80,3 +89,29 @@ def test_serial_source_reports_open_errors_as_source_errors():
     source = SerialSource("COM_DOES_NOT_EXIST", timeout=0.01)
     with pytest.raises(SourceError):
         next(source.lines())
+
+
+def test_file_byte_source_reads_raw_chunks(tmp_path):
+    capture = tmp_path / "capture.bin"
+    capture.write_bytes(b"\x00\x01\x02\xff")
+    assert b"".join(FileByteSource(str(capture)).chunks()) == b"\x00\x01\x02\xff"
+
+
+def test_file_byte_source_missing_file(tmp_path):
+    with pytest.raises(SourceError, match="file not found"):
+        FileByteSource(str(tmp_path / "nope.bin"))
+
+
+def test_open_byte_source_returns_file_source(tmp_path):
+    capture = tmp_path / "capture.bin"
+    capture.write_bytes(b"\xa5\x5a")
+    source = open_byte_source(str(capture))
+    assert isinstance(source, FileByteSource)
+    assert b"".join(source.chunks()) == b"\xa5\x5a"
+
+
+def test_open_byte_source_returns_serial_byte_source_for_ports():
+    # Constructing is enough: opening happens lazily in chunks().
+    source = open_byte_source("COM7@921600")
+    assert isinstance(source, SerialByteSource)
+    assert (source.port, source.baudrate) == ("COM7", 921600)

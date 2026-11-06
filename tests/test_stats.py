@@ -7,7 +7,7 @@ import math
 import pytest
 
 from stm32serial import StatsCollector, parse_samples, sparkline
-from stm32serial.stats import CSV_FIELDS, SPARK_CHARS, ChannelStats
+from stm32serial.stats import CSV_FIELDS, PERCENTILE_WINDOW, SPARK_CHARS, ChannelStats
 
 
 def test_accumulates_basic_statistics():
@@ -144,3 +144,49 @@ def test_write_csv(tmp_path):
 
 def test_mean_is_finite_for_empty_channel():
     assert math.isfinite(ChannelStats("x").mean)
+
+
+def test_stdev_survives_a_large_offset():
+    # Regression test: the previous sum-of-squares formula lost every digit of
+    # the variance at this magnitude and reported stdev == 0.0 for a signal
+    # that is clearly moving (ADC counts and microsecond timestamps live here).
+    channel = ChannelStats("adc")
+    for value in (1e8, 1e8 + 1, 1e8, 1e8 + 1):
+        channel.add(value)
+    assert channel.mean == pytest.approx(1e8 + 0.5)
+    assert channel.stdev == pytest.approx(0.5, abs=1e-9)
+
+
+def test_percentiles_interpolate_linearly():
+    channel = ChannelStats("x")
+    for value in range(1, 11):
+        channel.add(float(value))
+    assert channel.percentile(0.0) == 1.0
+    assert channel.percentile(1.0) == 10.0
+    assert channel.p50 == pytest.approx(5.5)
+    assert channel.p95 == pytest.approx(9.55)
+
+
+def test_percentiles_of_an_empty_channel_are_zero():
+    channel = ChannelStats("x")
+    assert channel.p50 == 0.0
+    assert channel.p95 == 0.0
+
+
+def test_percentile_window_is_bounded_and_trailing():
+    channel = ChannelStats("x")
+    for value in range(5000):
+        channel.add(float(value))
+    assert len(channel.window) == PERCENTILE_WINDOW
+    # Trailing window: the early samples have been evicted on purpose.
+    assert channel.p95 > 4000
+
+
+def test_as_dict_exposes_percentiles():
+    channel = ChannelStats("x")
+    for value in (1.0, 2.0, 3.0):
+        channel.add(value)
+    data = channel.as_dict()
+    assert list(data) == list(CSV_FIELDS)
+    assert data["p50"] == pytest.approx(2.0)
+    assert data["p95"] == pytest.approx(2.9)

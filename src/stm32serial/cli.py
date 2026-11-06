@@ -1,4 +1,4 @@
-"""Command line interface: ``read``, ``stats`` and ``demo``.
+"""Command line interface: ``read``, ``stats``, ``frames`` and ``demo``.
 
 Exit codes: ``0`` success, ``1`` user-facing error (missing file, unopenable
 port, invalid pattern), ``130`` interrupted with Ctrl-C.
@@ -7,17 +7,19 @@ port, invalid pattern), ``130`` interrupted with Ctrl-C.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 import time
 from collections.abc import Iterable, Iterator, Sequence
 
 from . import __version__
-from .demo import synthetic_lines
+from .demo import synthetic_frames, synthetic_lines
+from .framing import Frame, FrameDecoder
 from .parser import LEVELS, level_of, severity_of
 from .render import colorize, format_timestamp, render_table, supports_color
 from .stats import SPARK_CHARS, StatsCollector
-from .transport import SourceError, open_source
+from .transport import SourceError, open_byte_source, open_source
 
 PROG = "stm32serial"
 
@@ -96,6 +98,16 @@ def _open(target: str, baud: int, follow: bool):
         raise SourceError(str(exc)) from exc
 
 
+def _open_bytes(target: str, baud: int, follow: bool):
+    """Same as :func:`_open`, but for the raw byte sources used by ``frames``."""
+    try:
+        return open_byte_source(target, baud, follow=follow)
+    except SourceError:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive, keeps the CLI tidy
+        raise SourceError(str(exc)) from exc
+
+
 def _num(value: object) -> str:
     if isinstance(value, float):
         text = f"{value:.3f}"
@@ -145,7 +157,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print(collector.to_json())
         return 0
 
-    headers = ["channel", "unit", "count", "min", "max", "mean", "stdev", "last"]
+    headers = ["channel", "unit", "count", "min", "max", "mean", "stdev", "p50", "p95", "last"]
     if not args.no_sparkline:
         headers.append("trend")
 
@@ -160,6 +172,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
             _num(stats["max"]),
             _num(stats["mean"]),
             _num(stats["stdev"]),
+            _num(stats["p50"]),
+            _num(stats["p95"]),
             _num(stats["last"]),
         ]
         if not args.no_sparkline:
@@ -167,6 +181,76 @@ def cmd_stats(args: argparse.Namespace) -> int:
         rows.append(row)
 
     print(render_table(headers, rows))
+    return 0
+
+
+def _payload_text(frame: Frame, force_hex: bool) -> str:
+    """Printable payload when possible, hex dump otherwise."""
+    if not frame.payload:
+        return "-"
+    text = None if force_hex else frame.text
+    if text is not None:
+        return text
+    return " ".join(f"{byte:02x}" for byte in frame.payload)
+
+
+def _frame_chunks(args: argparse.Namespace) -> Iterator[bytes]:
+    if args.demo:
+        yield from synthetic_frames(args.demo, args.seed)
+        return
+    for target in args.targets:
+        source = _open_bytes(target, args.baud, args.follow)
+        try:
+            yield from source.chunks()
+        finally:
+            source.close()
+
+
+def cmd_frames(args: argparse.Namespace) -> int:
+    if not args.demo and not args.targets:
+        raise SourceError("frames needs a TARGET or --demo N")
+    decoder = FrameDecoder()
+    collected: list[Frame] = []
+    for chunk in _frame_chunks(args):
+        collected.extend(decoder.feed(chunk))
+        if args.max_frames and len(collected) >= args.max_frames:
+            collected = collected[: args.max_frames]
+            break
+
+    counters = decoder.counters()
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "frames": [
+                        {
+                            "seq": frame.sequence,
+                            "id": frame.msg_id,
+                            "length": frame.length,
+                            "payload_hex": frame.payload.hex(),
+                            "payload_text": frame.text,
+                        }
+                        for frame in collected
+                    ],
+                    "stats": counters,
+                },
+                indent=2,
+            )
+        )
+    else:
+        headers = ["seq", "id", "len", "payload"]
+        rows = [
+            [frame.sequence, f"0x{frame.msg_id:02x}", frame.length, _payload_text(frame, args.hex)]
+            for frame in collected
+        ]
+        if rows:
+            print(render_table(headers, rows))
+        print(
+            f"{counters['frames']} frame(s), {counters['crc_errors']} crc error(s), "
+            f"{counters['discarded_bytes']} byte(s) discarded, "
+            f"{counters['pending_bytes']} byte(s) pending",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -246,6 +330,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="sparkline width in characters (default: 40)",
     )
     stats.set_defaults(func=cmd_stats)
+
+    frames = subparsers.add_parser(
+        "frames", help="decode binary A5 5A frames with a CRC-16 checksum"
+    )
+    frames.add_argument(
+        "targets",
+        nargs="*",
+        metavar="TARGET",
+        help="a port (COM5@921600) or a binary capture file",
+    )
+    frames.add_argument("--baud", type=int, default=115200, help="baud rate for serial targets")
+    frames.add_argument(
+        "--demo",
+        type=int,
+        default=0,
+        metavar="N",
+        help="decode N synthetic frames instead of a target (0 = off)",
+    )
+    frames.add_argument(
+        "--seed",
+        type=int,
+        default=7,
+        help="random seed for --demo (default: 7)",
+    )
+    frames.add_argument("--hex", action="store_true", help="always render payloads as hex")
+    frames.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    frames.add_argument(
+        "--max-frames",
+        type=int,
+        default=0,
+        metavar="N",
+        help="stop after N frames (0 = unlimited)",
+    )
+    frames.add_argument(
+        "--follow", action="store_true", help="keep a capture file open and wait for more bytes"
+    )
+    frames.set_defaults(func=cmd_frames)
 
     demo = subparsers.add_parser("demo", help="print synthetic telemetry (no board required)")
     demo.add_argument(

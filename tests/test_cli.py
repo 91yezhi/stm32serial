@@ -1,4 +1,4 @@
-"""End-to-end tests for the CLI: ``read``, ``stats`` and ``demo``."""
+"""End-to-end tests for the CLI: ``read``, ``stats``, ``frames`` and ``demo``."""
 
 import csv
 import json
@@ -6,6 +6,7 @@ import json
 import pytest
 
 from stm32serial.cli import main
+from stm32serial.framing import encode_frame
 
 LOG = """\
 boot complete
@@ -32,7 +33,7 @@ def test_version_exits_zero(capsys):
     with pytest.raises(SystemExit) as excinfo:
         main(["--version"])
     assert excinfo.value.code == 0
-    assert "stm32serial 0.1.0" in capsys.readouterr().out
+    assert "stm32serial 0.2.0" in capsys.readouterr().out
 
 
 def test_demo_count_and_no_timestamps(capsys):
@@ -130,3 +131,59 @@ def test_stats_without_samples(tmp_path, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "no telemetry samples found" in captured.err
+
+
+def test_stats_table_includes_percentiles(log_file, capsys):
+    assert main(["stats", log_file, "--no-sparkline"]) == 0
+    header = capsys.readouterr().out.splitlines()[0]
+    assert "p50" in header and "p95" in header
+
+
+def test_frames_demo_prints_a_table(capsys):
+    assert main(["frames", "--demo", "5"]) == 0
+    captured = capsys.readouterr()
+    first = captured.out.splitlines()[0].split()
+    assert first[:3] == ["seq", "id", "len"]
+    assert "frame(s)" in captured.err
+
+
+def test_frames_demo_json(capsys):
+    # --demo N emits the boot frame plus N telemetry frames.
+    assert main(["frames", "--demo", "3", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["frames"]) == 4
+    assert payload["frames"][0]["id"] == 0x02
+    assert payload["frames"][0]["payload_text"] == "boot"
+    assert payload["stats"]["frames"] == 4
+
+
+def test_frames_decodes_a_capture_file(tmp_path, capsys):
+    capture = tmp_path / "capture.bin"
+    capture.write_bytes(
+        encode_frame(0x01, b"temp=21.5C") + b"\x00\x01" + encode_frame(0x02, b"\x00\x01")
+    )
+    assert main(["frames", str(capture)]) == 0
+    captured = capsys.readouterr()
+    assert "temp=21.5C" in captured.out
+    assert "0x02" in captured.out
+    assert "2 frame(s)" in captured.err
+    assert "2 byte(s) discarded" in captured.err
+
+
+def test_frames_hex_flag_forces_hex_output(tmp_path, capsys):
+    capture = tmp_path / "capture.bin"
+    capture.write_bytes(encode_frame(0x01, b"abc"))
+    assert main(["frames", str(capture), "--hex"]) == 0
+    assert "61 62 63" in capsys.readouterr().out
+
+
+def test_frames_max_frames(tmp_path, capsys):
+    capture = tmp_path / "capture.bin"
+    capture.write_bytes(b"".join(encode_frame(0x01, bytes([index])) for index in range(6)))
+    assert main(["frames", str(capture), "--max-frames", "2", "--json"]) == 0
+    assert len(json.loads(capsys.readouterr().out)["frames"]) == 2
+
+
+def test_frames_without_target_or_demo_reports_error(capsys):
+    assert main(["frames"]) == 1
+    assert "needs a TARGET" in capsys.readouterr().err

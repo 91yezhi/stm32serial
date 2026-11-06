@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stm32serial"
-version = "0.1.0"
+version = "0.2.0"
 description = "A tiny, testable CLI toolkit for STM32 serial telemetry: read, filter, aggregate and export."
 readme = "README.md"
 requires-python = ">=3.9"
