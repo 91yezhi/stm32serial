@@ -16,19 +16,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        # Python 3.9 has no setup-python build for Ubuntu 26.04 (the current
+        # `ubuntu-latest`), so the matrix runs on the 22.04 LTS image and an
+        # extra 3.13 job covers the newest runner.
+        os: [ubuntu-22.04]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
         include:
+          - os: ubuntu-latest
+            python-version: "3.13"
           - os: windows-latest
             python-version: "3.13"
           - os: macos-latest
             python-version: "3.13"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -52,8 +57,8 @@ jobs:
     name: build sdist and wheel
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - name: Build
